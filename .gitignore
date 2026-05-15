@@ -1,0 +1,17 @@
+# Compiled binaries
+wilsontest
+wilsontest2
+pw13
+*.o
+
+# GMP / NTT build artifacts (for when we build pw13)
+gmp-*/
+ntt-0.1.2/
+
+# Program output — residue files can be large and are reproducible
+wilson.txt
+wilsonres.txt
+e10.txt
+
+# Checkpoint / resume file written during a run
+wilsonwork.txt
