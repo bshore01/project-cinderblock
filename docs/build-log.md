@@ -466,3 +466,191 @@ output line. No false positives or missed entries from either program.
 | `ntt-0.1.2/ntt-internal.h` | Lines 370, 422: `#ifdef AVOID_128_BIT` → `#if AVOID_128_BIT` (bug fix: consistency with value-based check at line 58) |
 | `pw13.c` | Lines 79–84: replace path-prefixed GMP includes with `<gmp.h>` / `<omp.h>`, comment out `gmp-impl.h` and `longlong.h` |
 | `pw13.c` | Insert 25-line compatibility shim defining `count_leading_zeros`, `MP_LIMB_T_MAX`, `SIZ`, `PTR`, `MPZ_REALLOC`, `MPN_COPY`, `MPN_NORMALIZE` |
+
+---
+
+## Step P-7 — Multi-e validation (e=4, e=6, e=12) on [10000, 20000]
+
+### What pw13 writes to wilson.txt for e>2
+
+Before running the multi-e tests, the output code path was traced to confirm that
+pw13 writes `(p-1)! mod p²` — the full Wilson quotient — to `wilson.txt` for all
+values of e, not the intermediate `((p-1)/e)! mod p²`.
+
+The evidence is in `stage3` (line 5039):
+
+1. After `use_ratio(r, ...)`, the code executes:
+   ```c
+   mpz_add_ui(r,r,1);
+   assert(mpz_divisible_p(r,p)!=0);  // r+1 divisible by p
+   ```
+   This assertion is unconditional — it fires for every e value. By Wilson's
+   theorem, `(p-1)! ≡ -1 (mod p)` for every prime p, so `(p-1)! + 1` is
+   divisible by p. The assertion uniquely identifies `r` as `(p-1)! mod p²`.
+
+2. `use_ratio` for e≠2 contains its own intermediate assertion:
+   ```c
+   assert(mpz_cmp_ui(temp2,1)==0);  // (X * Y^e)^e ≡ 1 (mod p)
+   ```
+   confirming the cyclotomic correction factor X is applied before the final
+   reconstruction.
+
+3. Both programs use the same bound: `max(100, p/5000) = 100` for all p in
+   [10000, 20000]. So near-Wilson thresholds are identical.
+
+**Conclusion**: for all e, the value written is `k` where `(p-1)! ≡ -1 + k·p (mod p²)`.
+The cross-validation strategy is therefore: run pw13 with exponent e, then compare its
+`wilson.txt` against wilsontest's output filtered to primes `p ≡ 1 (mod e)`.
+
+### The optimization threshold issue
+
+pw13 has a hardcoded minimum starting prime for each e>2:
+
+| e | Threshold |
+|---|-----------|
+| 4 | 394,390,885,188 |
+| 6 | 384,531,113,058 |
+| 12 | 1,498,685,363,716 |
+
+These are **optimization floors**: below the threshold, pw13 considers e=2 more
+efficient for those primes and skips them. A compile-time flag
+`test_all_primes_for_e` (line 159, default 0) bypasses both the threshold check
+and the "skip if better e exists" sieve optimization, allowing pw13 to process
+any range with any e.
+
+The flag was flipped to 1 for the validation runs below, then restored to 0
+afterward. Step P-8 confirms the production binary is correct after restoration.
+
+---
+
+### Step P-7a — e=4 validation
+
+```
+# pw13 (test_all_primes_for_e=1)
+cd /tmp/p7_e4
+printf '4\n4\n10000 20000\n1000\n0\n0\n86400\n' | /path/pw13
+# completed in 4 sec; processed 516 primes p ≡ 1 (mod 4)
+
+# reference: wilsontest output from Step P-6 filtered to p ≡ 1 (mod 4)
+awk '{p=$1; if(p%4==1) print}' /tmp/p6_wt/wilson.txt | sort > /tmp/wt_mod4.txt
+
+diff <(sort /tmp/p7_e4/wilson.txt) /tmp/wt_mod4.txt
+```
+
+pw13 e=4 output:
+```
+12889 -1+95p
+13297 -1-62p
+16421 -1+90p
+```
+
+wilsontest filtered to p ≡ 1 (mod 4):
+```
+12889 -1+95p
+13297 -1-62p
+16421 -1+90p
+```
+
+| Metric | Value |
+|--------|-------|
+| Near-Wilson primes from pw13 (e=4) | 3 |
+| Near-Wilson primes from wilsontest (filtered) | 3 |
+| Primes in agreement | 3 |
+| Disagreements | **0** |
+
+---
+
+### Step P-7b — e=6 validation
+
+```
+cd /tmp/p7_e6
+printf '4\n6\n10000 20000\n1000\n0\n0\n86400\n' | /path/pw13
+# completed in 4 sec; processed 513 primes p ≡ 1 (mod 6)
+```
+
+pw13 e=6 output:
+```
+10567 -1-78p
+11047 -1-8p
+12799 -1+17p
+12889 -1+95p
+13297 -1-62p
+14419 -1+7p
+```
+
+wilsontest filtered to p ≡ 1 (mod 6):
+```
+10567 -1-78p
+11047 -1-8p
+12799 -1+17p
+12889 -1+95p
+13297 -1-62p
+14419 -1+7p
+```
+
+| Metric | Value |
+|--------|-------|
+| Near-Wilson primes from pw13 (e=6) | 6 |
+| Near-Wilson primes from wilsontest (filtered) | 6 |
+| Primes in agreement | 6 |
+| Disagreements | **0** |
+
+---
+
+### Step P-7c — e=12 validation
+
+```
+cd /tmp/p7_e12
+printf '4\n12\n10000 20000\n1000\n0\n0\n86400\n' | /path/pw13
+# completed in 4 sec; processed 255 primes p ≡ 1 (mod 12)
+```
+
+pw13 e=12 output:
+```
+12889 -1+95p
+13297 -1-62p
+```
+
+wilsontest filtered to p ≡ 1 (mod 12):
+```
+12889 -1+95p
+13297 -1-62p
+```
+
+| Metric | Value |
+|--------|-------|
+| Near-Wilson primes from pw13 (e=12) | 2 |
+| Near-Wilson primes from wilsontest (filtered) | 2 |
+| Primes in agreement | 2 |
+| Disagreements | **0** |
+
+**All three e values pass with zero disagreements.** Each prime reported by
+pw13 matches the Wilson quotient computed independently by wilsontest on the
+same prime. This validates that `use_ratio`'s reconstruction is correct at
+least for primes in [10000, 20000].
+
+---
+
+## Step P-8 — Production configuration restored
+
+After the multi-e tests, `test_all_primes_for_e` was flipped back to 0 and
+pw13 was recompiled with the standard flags. A fresh e=2 run on [10000, 20000]
+was performed and its sorted `wilson.txt` diffed against the wilsontest
+reference from Step P-6:
+
+```
+rm wilson.txt
+printf '4\n2\n10000 20000\n1000\n0\n0\n86400\n' | ./pw13
+diff <(sort wilson.txt) <(sort /tmp/p6_wt/wilson.txt)
+(no output — identical)
+```
+
+| Metric | Value |
+|--------|-------|
+| Near-Wilson primes (production pw13, e=2) | 15 |
+| Near-Wilson primes (wilsontest reference) | 15 |
+| Primes in agreement | 15 |
+| Disagreements | **0** |
+
+Production binary confirmed correct. `pw13.c` committed with
+`test_all_primes_for_e 0`.
