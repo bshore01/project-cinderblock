@@ -390,22 +390,74 @@ Completed in 3 seconds (includes one-time `setuppow1024()` precomputation).
 
 ### Step P-6 — Cross-validation against wilsontest on [10000, 20000]
 
-```
-printf '4\n2\n10000 20000\n1000\n0\n0\n86400\n' | ./pw13
-```
-
-Sorted output compared against the wilsontest reference from Session 1:
+Each program was run in its own temp directory so their `wilson.txt` files do
+not interfere.
 
 ```
-diff <(sort wilson.txt) <(sort /tmp/wt1/wilson.txt)
+# pw13
+mkdir -p /tmp/p6_pw13 && cd /tmp/p6_pw13
+printf '4\n2\n10000 20000\n1000\n0\n0\n86400\n' | /path/pw13
+# completed in 4 seconds (includes setuppow1024 precomputation)
+
+# wilsontest
+mkdir -p /tmp/p6_wt && cd /tmp/p6_wt
+printf '10000 20000\n1000\n0\n' | /path/wilsontest
+# completed in 1 second
+```
+
+Both programs wrote 15 near-Wilson primes to their respective `wilson.txt`.
+
+Sorted `wilson.txt` from each:
+
+```
+10567 -1-78p
+10739 -1-18p
+11047 -1-8p
+12659 -1+100p
+12799 -1+17p
+12889 -1+95p
+13043 -1-46p
+13297 -1-62p
+13967 -1-42p
+14419 -1+7p
+14519 -1+99p
+15959 -1-68p
+16319 -1-25p
+16421 -1+90p
+16823 -1-39p
+```
+
+```
+diff <(sort /tmp/p6_pw13/wilson.txt) <(sort /tmp/p6_wt/wilson.txt)
 (no output — identical)
 ```
 
-All 15 near-Wilson primes in [10000, 20000] match exactly between pw13 and
-wilsontest — same primes, same k-values. No Wilson primes (k=0) in this range,
-consistent with previous tests.
+| Metric | Value |
+|--------|-------|
+| Near-Wilson primes found by pw13 | 15 |
+| Near-Wilson primes found by wilsontest | 15 |
+| Primes in agreement (same p, same k) | 15 |
+| Disagreements | **0** |
+| Wilson primes (k=0) | 0 (none expected in this range) |
+
+All 15 near-Wilson primes agree exactly — same prime, same k-value, same
+output line. No false positives or missed entries from either program.
 
 ---
+
+### Summary of pw13 build steps
+
+| Step | Command | Result |
+|------|---------|--------|
+| Extract NTT library | `python3 -c "import tarfile; tarfile.open('ntt-0.1.2.tar.bz2').extractall('.')"` | OK, 17 files |
+| First compile attempt | `gcc -fopenmp ... -lgmp -lm -o pw13 pw13.c ntt-0.1.2/*.c` | FAIL (2 error classes) |
+| Fix ntt-internal.h | `#ifdef AVOID_128_BIT` → `#if AVOID_128_BIT` at lines 370, 422 | Fixed |
+| Apply compat shim | Replace GMP 5.0.4 includes; add shim in pw13.c | Fixed |
+| Second compile attempt | (same command, `-lgmp -lm` still before sources) | FAIL (linker: all GMP symbols undefined) |
+| Fix link order | Move `-lgmp -lm` to end of command line | Fixed |
+| Final compile | `gcc -fopenmp -m64 -fgnu89-inline -std=c99 -O2 -Wall -o pw13 pw13.c ntt-0.1.2/*.c -lgmp -lm` | OK (52 warnings, 0 errors) |
+| Smoke test 5–100 | `printf '4\n2\n5 100\n1000\n0\n0\n86400\n' \| ./pw13` | OK, 3 sec; `13 -1+0p` found |
+| Cross-validate 10000–20000 | `diff <(sort pw13/wilson.txt) <(sort wt/wilson.txt)` | **Identical** — 15/15 match, 0 disagreements |
 
 ### Summary of changes made
 
