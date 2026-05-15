@@ -76,16 +76,46 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
-#include "gmp-5.0.4/gmp.h" // or use mpir!
-#include "gmp-5.0.4/gmp-impl.h"
-#include "omp.h"
-#include "gmp-5.0.4/longlong.h"
+#include <gmp.h>
+// #include "gmp-5.0.4/gmp-impl.h"  -- replaced by compat shim below
+#include <omp.h>
+// #include "gmp-5.0.4/longlong.h"  -- replaced by compat shim below
 #include "ntt-0.1.2/ntt.h"
 #include "ntt-0.1.2/ntt-internal.h"
 
 #ifdef __unix__
 #include <unistd.h>
 #endif
+
+/* ---- GMP 6.x / Ubuntu 24.04 compatibility shim ----
+ *
+ * gmp-impl.h and longlong.h are internal GMP headers not installed by
+ * libgmp-dev.  The three symbols actually used by pw13.c are replaced here:
+ *
+ *  count_leading_zeros  (longlong.h)  -> GCC builtin
+ *  MP_LIMB_T_MAX        (gmp-impl.h)  -> trivial expression
+ *  SIZ / PTR / MPZ_REALLOC (gmp-impl.h) -> __mpz_struct field access
+ *    (_mp_size, _mp_d, _mp_alloc are part of GMP's public ABI;
+ *     _mpz_realloc is declared in the public gmp.h)
+ */
+#define count_leading_zeros(count, x) \
+    ((count) = (int)__builtin_clzll((unsigned long long)(x)))
+
+#ifndef MP_LIMB_T_MAX
+#define MP_LIMB_T_MAX  (~(mp_limb_t)0)
+#endif
+
+#define SIZ(x)       ((x)->_mp_size)
+#define PTR(x)       ((x)->_mp_d)
+#define MPZ_REALLOC(x, n) \
+    (((mp_size_t)(n) <= (x)->_mp_alloc) \
+     ? (x)->_mp_d \
+     : (mp_ptr)_mpz_realloc((x), (mp_size_t)(n)))
+
+#define MPN_COPY(d, s, n)  mpn_copyi((d), (s), (n))
+#define MPN_NORMALIZE(d, n) \
+    do { while ((n) > 0 && (d)[(n)-1] == 0) (n)--; } while (0)
+/* ---- end compatibility shim ---- */
 
 #define MUL_TRESHOLD tune_tab[1] // FFT treshold on a single core (using ntt library)
 #define BARRETT1_TRESHOLD 200 // below this size (in limbs) we use division in gmp,mpir

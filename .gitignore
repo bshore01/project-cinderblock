@@ -13,5 +13,6 @@ wilson.txt
 wilsonres.txt
 e10.txt
 
-# Checkpoint / resume file written during a run
+# Checkpoint / resume files written during a run
 wilsonwork.txt
+wilsondone.txt

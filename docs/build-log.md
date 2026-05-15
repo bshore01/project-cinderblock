@@ -216,3 +216,201 @@ previous tests.
 | Cross-check 10000–20000 | `diff wt1/wilson.txt wt2/wilson.txt` | Byte-for-byte identical |
 
 No source modifications were necessary for either program.
+
+---
+
+## pw13.c build
+
+### Step P-1 — Extract NTT library
+
+```
+python3 -c "import tarfile; tarfile.open('ntt-0.1.2.tar.bz2').extractall('.')"
+```
+
+Extracted 17 files into `ntt-0.1.2/`:
+
+| Type | Files |
+|------|-------|
+| Sources | `fft_array.c`, `fft_base.c`, `fft_main.c`, `intmult.c`, `memory.c`, `misc.c`, `modarith.c`, `profile.c`, `tunetab.c` |
+| Headers | `ntt.h`, `ntt-internal.h` |
+| Other | `makefile`, `run.py`, `test.c`, `test.h`, `tune.c`, `COPYING` |
+
+Note: `bzip2` was not installed; Python's built-in `tarfile` module handled the extraction.
+
+The NTT library's headers use only `<gmp.h>` (public API) plus OpenMP and
+standard C headers — no GMP internals.
+
+---
+
+### Step P-2 — First compile attempt (expected to fail)
+
+Command (original embedded compile line, minus the hardcoded
+`-I/home/gerbicz/gmp-5.0.2 -L/home/gerbicz/gmp-5.0.2` paths):
+
+```
+gcc -fopenmp -m64 -fgnu89-inline -std=c99 -O2 -lgmp -lm -Wall \
+  -o pw13 pw13.c \
+  ntt-0.1.2/profile.c ntt-0.1.2/misc.c ntt-0.1.2/modarith.c ntt-0.1.2/memory.c \
+  ntt-0.1.2/fft_main.c ntt-0.1.2/fft_base.c ntt-0.1.2/fft_array.c \
+  ntt-0.1.2/intmult.c ntt-0.1.2/tunetab.c
+```
+
+**Errors (two distinct problems):**
+
+1. `pw13.c:79: fatal error: gmp-5.0.4/gmp.h: No such file or directory` —
+   includes use path-prefixed `"gmp-5.0.4/gmp.h"` etc.
+
+2. `ntt-internal.h:372: error: implicit declaration of function 'MUL128'` —
+   a preprocessor consistency bug in the NTT library: `AVOID_128_BIT` is
+   always **defined** (as `0` at line 25 via `#ifndef`), so `#ifdef
+   AVOID_128_BIT` guards at lines 370 and 422 always fire, but the `MUL128`/
+   `DIV128` macro definitions live in a `#if AVOID_128_BIT` (value-check) block
+   that evaluates false. The `#ifdef` should be `#if` at those two sites.
+
+---
+
+### Step P-3 — Minimal source changes
+
+#### Fix 1: `ntt-0.1.2/ntt-internal.h` — two `#ifdef` → `#if` corrections
+
+Lines 370 and 422: changed `#ifdef AVOID_128_BIT` to `#if AVOID_128_BIT` so
+the value (0 = use `__uint128_t` path) is checked consistently everywhere.
+On GCC 15 with `__int128` available, `AVOID_128_BIT=0` is correct and the
+assembly `MUL128`/`DIV128` macros are rightly skipped.
+
+#### Fix 2: `pw13.c` — includes and compatibility shim
+
+**Include changes (lines 79–84):**
+
+```c
+// Before:
+#include "gmp-5.0.4/gmp.h"
+#include "gmp-5.0.4/gmp-impl.h"
+#include "omp.h"
+#include "gmp-5.0.4/longlong.h"
+
+// After:
+#include <gmp.h>
+// #include "gmp-5.0.4/gmp-impl.h"  -- replaced by compat shim below
+#include <omp.h>
+// #include "gmp-5.0.4/longlong.h"  -- replaced by compat shim below
+```
+
+**Compatibility shim inserted after the `#ifdef __unix__` block:**
+
+```c
+/* ---- GMP 6.x / Ubuntu 24.04 compatibility shim ---- */
+
+// longlong.h -> GCC builtin
+#define count_leading_zeros(count, x) \
+    ((count) = (int)__builtin_clzll((unsigned long long)(x)))
+
+// gmp-impl.h trivial constant
+#ifndef MP_LIMB_T_MAX
+#define MP_LIMB_T_MAX  (~(mp_limb_t)0)
+#endif
+
+// gmp-impl.h struct accessor macros -> direct __mpz_struct field access
+// (_mp_size, _mp_d, _mp_alloc are part of GMP's public ABI;
+//  _mpz_realloc is declared in the public gmp.h)
+#define SIZ(x)       ((x)->_mp_size)
+#define PTR(x)       ((x)->_mp_d)
+#define MPZ_REALLOC(x, n) \
+    (((mp_size_t)(n) <= (x)->_mp_alloc) \
+     ? (x)->_mp_d \
+     : (mp_ptr)_mpz_realloc((x), (mp_size_t)(n)))
+
+// gmp-impl.h limb-array macros -> trivial equivalents
+#define MPN_COPY(d, s, n)  mpn_copyi((d), (s), (n))
+#define MPN_NORMALIZE(d, n) \
+    do { while ((n) > 0 && (d)[(n)-1] == 0) (n)--; } while (0)
+```
+
+**Why direct struct access for SIZ/PTR/MPZ_REALLOC:** The `__mpz_struct`
+fields `_mp_size`, `_mp_d`, and `_mp_alloc` are part of GMP's stable public
+ABI (documented as such; applications may access them). This is simpler and
+more direct than `mpz_import`/`mpz_export`, which would require a temporary
+buffer and add unnecessary copies. `_mpz_realloc` is declared in the public
+`gmp.h`.
+
+---
+
+### Step P-4 — Second compile attempt
+
+**New error:** `MPN_NORMALIZE` and `MPN_COPY` — two more `gmp-impl.h` macros
+found during compilation (at lines 3447 and 3581). Added to the shim above.
+
+**New error:** linker failure — all GMP symbols undefined. Cause: `-lgmp -lm`
+were placed *before* the source files in the command. `ld.bfd` requires
+libraries to follow the objects that reference them.
+
+**Fix:** move `-lgmp -lm` to the end of the command line.
+
+**Final working compile command:**
+
+```
+gcc -fopenmp -m64 -fgnu89-inline -std=c99 -O2 -Wall \
+  -o pw13 pw13.c \
+  ntt-0.1.2/profile.c ntt-0.1.2/misc.c ntt-0.1.2/modarith.c ntt-0.1.2/memory.c \
+  ntt-0.1.2/fft_main.c ntt-0.1.2/fft_base.c ntt-0.1.2/fft_array.c \
+  ntt-0.1.2/intmult.c ntt-0.1.2/tunetab.c \
+  -lgmp -lm
+```
+
+Result: **success** — 52 warnings (pre-existing style issues: misleading
+indentation, unused variables, unchecked `scanf`/`fread` returns), zero errors.
+Binary: `pw13` (334 KB).
+
+---
+
+### Step P-5 — Smoke test
+
+pw13.c has a different interactive prompt sequence than wilsontest.c:
+
+| # | Prompt | Value used |
+|---|--------|------------|
+| 1 | Number of cores | 4 |
+| 2 | Exponent `e` (must be in allowed list) | 2 (Wilson mode) |
+| 3 | Start and end of range | `5 100` |
+| 4 | Primes per batch (interval) | 1000 |
+| 5 | Print all residues to file (0/1) | 0 |
+| 6 | Use large savefile (0/1) | 0 |
+| 7 | Wall time limit (seconds) | 86400 |
+
+```
+printf '4\n2\n5 100\n1000\n0\n0\n86400\n' | ./pw13
+```
+
+Note: pw13.c enforces a minimum start of `3*e+1 = 7` for `e=2`, so p=5 is
+outside its search range. p=13 was correctly identified: `13 -1+0p`.
+
+Completed in 3 seconds (includes one-time `setuppow1024()` precomputation).
+
+---
+
+### Step P-6 — Cross-validation against wilsontest on [10000, 20000]
+
+```
+printf '4\n2\n10000 20000\n1000\n0\n0\n86400\n' | ./pw13
+```
+
+Sorted output compared against the wilsontest reference from Session 1:
+
+```
+diff <(sort wilson.txt) <(sort /tmp/wt1/wilson.txt)
+(no output — identical)
+```
+
+All 15 near-Wilson primes in [10000, 20000] match exactly between pw13 and
+wilsontest — same primes, same k-values. No Wilson primes (k=0) in this range,
+consistent with previous tests.
+
+---
+
+### Summary of changes made
+
+| File | Change |
+|------|--------|
+| `ntt-0.1.2/ntt-internal.h` | Lines 370, 422: `#ifdef AVOID_128_BIT` → `#if AVOID_128_BIT` (bug fix: consistency with value-based check at line 58) |
+| `pw13.c` | Lines 79–84: replace path-prefixed GMP includes with `<gmp.h>` / `<omp.h>`, comment out `gmp-impl.h` and `longlong.h` |
+| `pw13.c` | Insert 25-line compatibility shim defining `count_leading_zeros`, `MP_LIMB_T_MAX`, `SIZ`, `PTR`, `MPZ_REALLOC`, `MPN_COPY`, `MPN_NORMALIZE` |
